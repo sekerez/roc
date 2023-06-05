@@ -2374,15 +2374,7 @@ fn list_literal<'a, 'ctx>(
             let ptr = allocate_list(env, layout_interner, element_layout, list_length_intval);
 
             // then, copy the relevant segment from the constant section into the heap
-            env.builder
-                .build_memcpy(
-                    ptr,
-                    alignment,
-                    global,
-                    alignment,
-                    env.ptr_int().const_int(size as _, false),
-                )
-                .unwrap();
+            build_known_size_memcpy(env, ptr, global, alignment, size as _);
 
             // then replace the `undef`s with the values that we evaluate at runtime
             for (index, val) in runtime_evaluated_elements {
@@ -2490,19 +2482,15 @@ pub fn store_roc_value<'a, 'ctx>(
         let align_bytes = layout_interner.alignment_bytes(layout);
 
         if align_bytes > 0 {
-            let size = env
-                .ptr_int()
-                .const_int(layout_interner.stack_size(layout) as u64, false);
+            let size = layout_interner.stack_size(layout) as u64;
 
-            env.builder
-                .build_memcpy(
-                    destination,
-                    align_bytes,
-                    value.into_pointer_value(),
-                    align_bytes,
-                    size,
-                )
-                .unwrap();
+            build_known_size_memcpy(
+                env,
+                destination,
+                value.into_pointer_value(),
+                align_bytes,
+                size,
+            );
         }
     } else {
         let destination_type = destination
@@ -2640,18 +2628,14 @@ pub fn build_exp_stmt<'a, 'ctx>(
                             //
                             // Hence, we explicitly memcpy source to destination, and rely on
                             // LLVM optimizing away any inefficiencies.
-                            let width = layout_interner.stack_size(layout);
-                            let size = env.ptr_int().const_int(width as _, false);
-
-                            env.builder
-                                .build_memcpy(
-                                    destination,
-                                    align_bytes,
-                                    value.into_pointer_value(),
-                                    align_bytes,
-                                    size,
-                                )
-                                .unwrap();
+                            let width = layout_interner.stack_size(layout) as u64;
+                            build_known_size_memcpy(
+                                env,
+                                destination,
+                                value.into_pointer_value(),
+                                align_bytes,
+                                width,
+                            );
                         }
                     } else {
                         env.builder.build_store(destination, value);
@@ -5242,19 +5226,14 @@ fn build_closure_caller<'a, 'ctx>(
             let align_bytes = layout_interner.alignment_bytes(return_layout);
 
             if align_bytes > 0 {
-                let size = env
-                    .ptr_int()
-                    .const_int(layout_interner.stack_size(return_layout) as u64, false);
-
-                env.builder
-                    .build_memcpy(
-                        output,
-                        align_bytes,
-                        call_result.into_pointer_value(),
-                        align_bytes,
-                        size,
-                    )
-                    .unwrap();
+                let size = layout_interner.stack_size(return_layout) as u64;
+                build_known_size_memcpy(
+                    env,
+                    output,
+                    call_result.into_pointer_value(),
+                    align_bytes,
+                    size,
+                );
             }
         } else {
             builder.build_store(output, call_result);
@@ -5274,6 +5253,189 @@ fn build_closure_caller<'a, 'ctx>(
         alias_symbol,
         lambda_set.runtime_representation(),
     );
+}
+
+// When the size of memcpy is known at compile time, we should avoid calling memcpy.
+// This will reduce branches and improve performance.
+// For the current function, we follow the folly split.
+// For anything less than or equal to 256 bytes, we do things manually here.
+// If it is over 256 bytes, we defer to memcpy and let it vectorwise properly.
+// Note: we load things in vector register sized chunks, but depend on llvm to actually decide to vectorize.
+// TODO: perf benchmark some of this and verify vector assembly generation.
+fn build_known_size_memcpy(
+    env: &Env,
+    output: PointerValue,
+    input: PointerValue,
+    align_bytes: u32,
+    size: u64,
+) {
+    if size == 0 {
+        return;
+    }
+    let builder = env.builder;
+    let context = &env.context;
+
+    // We are doing a manual memcpy. Load everything first and then store everything after.
+    // n <=  16: overlapping unaligned movs
+    // n <=  32: overlapping unaligned 16-byte SSE XMM load/stores
+    // n <= 256: overlapping unaligned 32-byte AVX YMM load/stores
+    if size == 1 {
+        let byte_ptr = context.i8_type().ptr_type(AddressSpace::default());
+        let input_byte_ptr = builder.build_pointer_cast(input, byte_ptr, "input_to_byte_ptr");
+        let value = builder.build_load(input_byte_ptr, "load_input_byte");
+
+        let output_byte_ptr = builder.build_pointer_cast(output, byte_ptr, "output_to_byte_ptr");
+        builder.build_store(output_byte_ptr, value);
+    } else if size <= 3 {
+        let elem_ptr_type = context.i16_type().ptr_type(AddressSpace::default());
+        build_overlapping_move(env, input, output, elem_ptr_type, size);
+    } else if size <= 7 {
+        let elem_ptr_type = context.i32_type().ptr_type(AddressSpace::default());
+        build_overlapping_move(env, input, output, elem_ptr_type, size);
+    } else if size <= 16 {
+        let elem_ptr_type = context.i64_type().ptr_type(AddressSpace::default());
+        build_overlapping_move(env, input, output, elem_ptr_type, size);
+    } else if size <= 32 {
+        let elem_ptr_type = context.i128_type().ptr_type(AddressSpace::default());
+        build_overlapping_move(env, input, output, elem_ptr_type, size);
+    // } else if size <= 256 {
+    //     // Directly load and store until the less than 64 bytes remaing.
+    //     // The last chunk of bytes bytes should be be overlap moved.
+    //     // If llvm optimizes this correctly, it should be all 256 vector loads and stores
+    //     let elem_ptr_type = context
+    //         .custom_width_int_type(256)
+    //         .ptr_type(AddressSpace::default());
+
+    //     let input_elem_ptr = builder.build_pointer_cast(input, elem_ptr_type, "input_to_elem_ptr");
+    //     let output_elem_ptr =
+    //         builder.build_pointer_cast(output, elem_ptr_type, "output_to_elem_ptr");
+
+    //     // First load all data.
+    //     let mut remaining_size = size;
+    //     let mut loaded_vals = Vec::with_capacity_in(size as usize / 32, env.arena);
+    //     let mut i = 0;
+    //     while remaining_size > 64 {
+    //         let input_elem_ptr = unsafe {
+    //             builder.build_in_bounds_gep(
+    //                 input_elem_ptr,
+    //                 &[env.ptr_int().const_int(i, false)],
+    //                 "input_next_value_ptr",
+    //             )
+    //         };
+    //         loaded_vals.push(builder.build_load(input_elem_ptr, "load_input_next_elem"));
+
+    //         i += 1;
+    //         remaining_size -= 32;
+    //     }
+
+    //     let input_remaining = unsafe {
+    //         builder.build_in_bounds_gep(
+    //             input_elem_ptr,
+    //             &[env.ptr_int().const_int(i, false)],
+    //             "input_remaining",
+    //         )
+    //     };
+    //     let output_remaining = unsafe {
+    //         builder.build_in_bounds_gep(
+    //             output_elem_ptr,
+    //             &[env.ptr_int().const_int(i, false)],
+    //             "output_remaining",
+    //         )
+    //     };
+
+    //     // Do overlapping move next to do final loads before any stores.
+    //     build_overlapping_move(
+    //         env,
+    //         input_remaining,
+    //         output_remaining,
+    //         elem_ptr_type,
+    //         remaining_size,
+    //     );
+
+    //     // Final store all loaded values.
+    //     for (i, loaded_val) in loaded_vals.into_iter().enumerate() {
+    //         let output_elem_ptr = unsafe {
+    //             builder.build_in_bounds_gep(
+    //                 output_elem_ptr,
+    //                 &[env.ptr_int().const_int(i as _, false)],
+    //                 "output_next_value_ptr",
+    //             )
+    //         };
+    //         builder.build_store(output_elem_ptr, loaded_val);
+    //     }
+    } else {
+        // For large sizes, fallback on regular memcpy.
+        builder
+            .build_memcpy(
+                output,
+                align_bytes,
+                input,
+                align_bytes,
+                env.ptr_int().const_int(size as _, false),
+            )
+            .unwrap();
+    }
+}
+
+// This is 2 copies. One from the start. Another from the end minus the element type size.
+// They are expected to overlap.
+fn build_overlapping_move(
+    env: &Env,
+    input: PointerValue,
+    output: PointerValue,
+    elem_ptr_type: inkwell::types::PointerType,
+    size: u64,
+) {
+    let elem_bytes = (elem_ptr_type
+        .get_element_type()
+        .into_int_type()
+        .get_bit_width()
+        / 8) as u64;
+    debug_assert!(size >= elem_bytes && size <= 2 * elem_bytes);
+
+    let builder = env.builder;
+    let context = &env.context;
+    let byte_ptr_type = context.i8_type().ptr_type(AddressSpace::default());
+    let input_byte_ptr = builder.build_pointer_cast(input, byte_ptr_type, "input_to_byte_ptr");
+    let output_byte_ptr = builder.build_pointer_cast(output, byte_ptr_type, "output_to_byte_ptr");
+
+    let input_elem_ptr =
+        builder.build_pointer_cast(input_byte_ptr, elem_ptr_type, "input_to_elem_ptr");
+    let value1 = builder.build_load(input_elem_ptr, "load_input_first_elem");
+
+    let second_value_offset = size - elem_bytes;
+    let second_value_offset_int = env.ptr_int().const_int(second_value_offset, false);
+    let value2 = if second_value_offset != 0 {
+        let input_byte_ptr = unsafe {
+            builder.build_in_bounds_gep(
+                input_byte_ptr,
+                &[second_value_offset_int],
+                "input_second_value_ptr",
+            )
+        };
+        let input_elem_ptr =
+            builder.build_pointer_cast(input_byte_ptr, elem_ptr_type, "input_to_elem_ptr");
+        Some(builder.build_load(input_elem_ptr, "load_input_second_elem"))
+    } else {
+        None
+    };
+
+    let output_elem_ptr =
+        builder.build_pointer_cast(output_byte_ptr, elem_ptr_type, "output_to_elem_ptr");
+    builder.build_store(output_elem_ptr, value1);
+
+    if let Some(value2) = value2 {
+        let output_byte_ptr = unsafe {
+            builder.build_in_bounds_gep(
+                output_byte_ptr,
+                &[second_value_offset_int],
+                "output_second_value_ptr",
+            )
+        };
+        let output_elem_ptr =
+            builder.build_pointer_cast(output_byte_ptr, elem_ptr_type, "output_to_elem_ptr");
+        builder.build_store(output_elem_ptr, value2);
+    }
 }
 
 fn build_host_exposed_alias_size<'a, 'r>(
