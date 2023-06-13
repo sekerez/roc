@@ -63,6 +63,7 @@ fn generateLlvmIrFile(
     obj.emit_llvm_bc = .emit;
     obj.emit_bin = .no_emit;
     obj.target = target;
+    obj.disable_stack_probing = true;
 
     const ir = b.step(step_name, "Build LLVM ir");
     ir.dependOn(&obj.step);
@@ -88,6 +89,8 @@ fn generateObjectFile(
     obj.strip = true;
     obj.target = target;
     obj.link_function_sections = true;
+    obj.disable_stack_probing = true;
+
     const obj_step = b.step(step_name, "Build object file for linking");
     obj_step.dependOn(&obj.step);
 }
