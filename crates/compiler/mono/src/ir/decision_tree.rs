@@ -5,8 +5,8 @@ use crate::ir::{
     GuardStmtSpec, JoinPointId, Literal, Param, Procs, Stmt,
 };
 use crate::layout::{
-    Builtin, InLayout, Layout, LayoutCache, LayoutInterner, TLLayoutInterner, TagIdIntType,
-    UnionLayout,
+    Builtin, InLayout, Layout, LayoutCache, LayoutInterner, LayoutRepr, TLLayoutInterner,
+    TagIdIntType, UnionLayout,
 };
 use roc_builtins::bitcode::{FloatWidth, IntWidth};
 use roc_collections::all::{MutMap, MutSet};
@@ -109,6 +109,7 @@ enum Test<'a> {
         arguments: Vec<(Pattern<'a>, InLayout<'a>)>,
     },
     IsInt([u8; 16], IntWidth),
+    // stores the f64 bits; u64 so that this type can impl Hash
     IsFloat(u64, FloatWidth),
     IsDecimal([u8; 16]),
     IsStr(Box<str>),
@@ -131,7 +132,7 @@ impl<'a> Test<'a> {
                 // llvm does not like switching on 128-bit values
                 !matches!(int_width, IntWidth::U128 | IntWidth::I128)
             }
-            Test::IsFloat(_, _) => true,
+            Test::IsFloat(_, _) => false,
             Test::IsDecimal(_) => false,
             Test::IsStr(_) => false,
             Test::IsBit(_) => true,
@@ -1014,13 +1015,7 @@ fn to_relevant_branch_help<'a>(
                     // the test matches the constructor of this pattern
                     match layout {
                         UnionLayout::NonRecursive([[arg]])
-                            if matches!(
-                                interner.get(*arg),
-                                Layout::Struct {
-                                    field_layouts: [_],
-                                    ..
-                                }
-                            ) =>
+                            if matches!(interner.get_repr(*arg), LayoutRepr::Struct([_],)) =>
                         {
                             // a one-element record equivalent
                             // Theory: Unbox doesn't have any value for us
@@ -1193,7 +1188,7 @@ fn extract<'a>(
 
 /// FIND IRRELEVANT BRANCHES
 
-fn is_irrelevant_to(selected_path: &[PathInstruction], branch: &Branch<'_>) -> bool {
+fn is_irrelevant_to(selected_path: &[PathInstruction], branch: &Branch) -> bool {
     match branch
         .patterns
         .iter()
@@ -1358,7 +1353,7 @@ fn small_branching_factor(branches: &[Branch], path: &[PathInstruction]) -> usiz
         branches.iter().any(|b| is_irrelevant_to(path, b))
     };
 
-    relevant_tests.len() + (if !fallbacks { 0 } else { 1 })
+    relevant_tests.len() + usize::from(fallbacks)
 }
 
 #[derive(Debug, PartialEq)]
@@ -1580,7 +1575,7 @@ fn path_to_expr_help<'a>(
                 let index = *index;
 
                 match layout_interner.chase_recursive(layout) {
-                    Layout::Union(union_layout) => {
+                    LayoutRepr::Union(union_layout) => {
                         let inner_expr = Expr::UnionAtIndex {
                             tag_id: *tag_id,
                             structure: symbol,
@@ -1600,7 +1595,7 @@ fn path_to_expr_help<'a>(
                         layout = inner_layout;
                     }
 
-                    Layout::Struct { field_layouts, .. } => {
+                    LayoutRepr::Struct(field_layouts) => {
                         debug_assert!(field_layouts.len() > 1);
 
                         let inner_expr = Expr::StructAtIndex {
@@ -1632,8 +1627,8 @@ fn path_to_expr_help<'a>(
             PathInstruction::ListIndex { index } => {
                 let list_sym = symbol;
 
-                match layout_interner.get(layout) {
-                    Layout::Builtin(Builtin::List(elem_layout)) => {
+                match layout_interner.get_repr(layout) {
+                    LayoutRepr::Builtin(Builtin::List(elem_layout)) => {
                         let (index_sym, new_stores) = build_list_index_probe(env, list_sym, index);
 
                         stores.extend(new_stores);
@@ -1680,7 +1675,7 @@ fn test_to_comparison<'a>(
             debug_assert!(union.alternatives.len() > 1);
 
             match layout_interner.chase_recursive(test_layout) {
-                Layout::Union(union_layout) => {
+                LayoutRepr::Union(union_layout) => {
                     let lhs = Expr::Literal(Literal::Int((tag_id as i128).to_ne_bytes()));
 
                     let rhs = Expr::GetTagId {
@@ -1699,7 +1694,7 @@ fn test_to_comparison<'a>(
                     (
                         stores,
                         (lhs_symbol, Comparator::Eq, rhs_symbol),
-                        Some(ConstructorKnown::OnlyPass {
+                        Some(ConstructorKnown::OneTag {
                             scrutinee: path_symbol,
                             layout: *cond_layout,
                             tag_id,
@@ -1769,8 +1764,8 @@ fn test_to_comparison<'a>(
             let list_layout = test_layout;
             let list_sym = rhs_symbol;
 
-            match layout_interner.get(list_layout) {
-                Layout::Builtin(Builtin::List(_elem_layout)) => {
+            match layout_interner.get_repr(list_layout) {
+                LayoutRepr::Builtin(Builtin::List(_elem_layout)) => {
                     let real_len_expr = Expr::Call(Call {
                         call_type: CallType::LowLevel {
                             op: LowLevel::ListLen,
@@ -1855,7 +1850,7 @@ fn compile_test<'a>(
 ) -> Stmt<'a> {
     compile_test_help(
         env,
-        ConstructorKnown::Neither,
+        ConstructorKnown::None,
         ret_layout,
         stores,
         lhs,
@@ -1885,7 +1880,7 @@ fn compile_test_help<'a>(
     let (pass_info, fail_info) = {
         use ConstructorKnown::*;
         match branch_info {
-            Both {
+            BothTags {
                 scrutinee,
                 layout,
                 pass,
@@ -1905,7 +1900,7 @@ fn compile_test_help<'a>(
                 (pass_info, fail_info)
             }
 
-            OnlyPass {
+            OneTag {
                 scrutinee,
                 layout,
                 tag_id,
@@ -1919,7 +1914,13 @@ fn compile_test_help<'a>(
                 (pass_info, BranchInfo::None)
             }
 
-            Neither => (BranchInfo::None, BranchInfo::None),
+            ListLen { scrutinee, len } => {
+                let pass_info = BranchInfo::List { scrutinee, len };
+
+                (pass_info, BranchInfo::None)
+            }
+
+            None => (BranchInfo::None, BranchInfo::None),
         }
     };
 
@@ -1981,18 +1982,22 @@ fn compile_tests<'a>(
 
 #[derive(Debug)]
 enum ConstructorKnown<'a> {
-    Both {
+    BothTags {
         scrutinee: Symbol,
         layout: InLayout<'a>,
         pass: TagIdIntType,
         fail: TagIdIntType,
     },
-    OnlyPass {
+    OneTag {
         scrutinee: Symbol,
         layout: InLayout<'a>,
         tag_id: TagIdIntType,
     },
-    Neither,
+    ListLen {
+        scrutinee: Symbol,
+        len: u64,
+    },
+    None,
 }
 
 impl<'a> ConstructorKnown<'a> {
@@ -2006,23 +2011,30 @@ impl<'a> ConstructorKnown<'a> {
                 Test::IsCtor { tag_id, union, .. } if path.is_empty() => {
                     if union.alternatives.len() == 2 {
                         // excluded middle: we also know the tag_id in the fail branch
-                        ConstructorKnown::Both {
+                        ConstructorKnown::BothTags {
                             layout: cond_layout,
                             scrutinee: cond_symbol,
                             pass: *tag_id,
                             fail: (*tag_id == 0) as _,
                         }
                     } else {
-                        ConstructorKnown::OnlyPass {
+                        ConstructorKnown::OneTag {
                             layout: cond_layout,
                             scrutinee: cond_symbol,
                             tag_id: *tag_id,
                         }
                     }
                 }
-                _ => ConstructorKnown::Neither,
+                Test::IsListLen {
+                    bound: ListLenBound::Exact,
+                    len,
+                } if path.is_empty() => ConstructorKnown::ListLen {
+                    scrutinee: cond_symbol,
+                    len: *len,
+                },
+                _ => ConstructorKnown::None,
             },
-            _ => ConstructorKnown::Neither,
+            _ => ConstructorKnown::None,
         }
     }
 }
@@ -2240,7 +2252,7 @@ fn decide_to_branching<'a>(
 
                 let tag = match test {
                     Test::IsInt(v, _) => i128::from_ne_bytes(v) as u64,
-                    Test::IsFloat(v, _) => v,
+                    Test::IsFloat(_, _) => unreachable!("floats cannot be switched on"),
                     Test::IsBit(v) => v as u64,
                     Test::IsByte { tag_id, .. } => tag_id as u64,
                     Test::IsCtor { tag_id, .. } => tag_id as u64,
@@ -2255,18 +2267,31 @@ fn decide_to_branching<'a>(
                 };
 
                 // branch info is only useful for refcounted values
-                let branch_info = if let Test::IsCtor { tag_id, union, .. } = test {
-                    tag_id_sum -= tag_id as i64;
-                    union_size = union.alternatives.len() as i64;
+                let branch_info = match test {
+                    Test::IsCtor { tag_id, union, .. } => {
+                        tag_id_sum -= tag_id as i64;
+                        union_size = union.alternatives.len() as i64;
 
-                    BranchInfo::Constructor {
-                        scrutinee: inner_cond_symbol,
-                        layout: inner_cond_layout,
-                        tag_id,
+                        BranchInfo::Constructor {
+                            scrutinee: inner_cond_symbol,
+                            layout: inner_cond_layout,
+                            tag_id,
+                        }
                     }
-                } else {
-                    tag_id_sum = -1;
-                    BranchInfo::None
+                    Test::IsListLen {
+                        bound: ListLenBound::Exact,
+                        len,
+                    } => {
+                        tag_id_sum = -1;
+                        BranchInfo::List {
+                            scrutinee: inner_cond_symbol,
+                            len,
+                        }
+                    }
+                    _ => {
+                        tag_id_sum = -1;
+                        BranchInfo::None
+                    }
                 };
 
                 branches.push((tag, branch_info, branch));
@@ -2286,7 +2311,7 @@ fn decide_to_branching<'a>(
             // We have learned more about the exact layout of the cond (based on the path)
             // but tests are still relative to the original cond symbol
             let inner_cond_layout_raw = layout_cache.interner.chase_recursive(inner_cond_layout);
-            let mut switch = if let Layout::Union(union_layout) = inner_cond_layout_raw {
+            let mut switch = if let LayoutRepr::Union(union_layout) = inner_cond_layout_raw {
                 let tag_id_symbol = env.unique_symbol();
 
                 let temp = Stmt::Switch {
@@ -2308,7 +2333,7 @@ fn decide_to_branching<'a>(
                     union_layout.tag_id_layout(),
                     env.arena.alloc(temp),
                 )
-            } else if let Layout::Builtin(Builtin::List(_)) = inner_cond_layout_raw {
+            } else if let LayoutRepr::Builtin(Builtin::List(_)) = inner_cond_layout_raw {
                 let len_symbol = env.unique_symbol();
 
                 let switch = Stmt::Switch {
@@ -2366,8 +2391,8 @@ fn boolean_all<'a>(arena: &'a Bump, tests: Vec<(Expr<'a>, Expr<'a>, InLayout<'a>
         expr = Expr::RunLowLevel(
             LowLevel::And,
             arena.alloc([
-                (test, Layout::Builtin(Builtin::Int1)),
-                (expr, Layout::Builtin(Builtin::Int1)),
+                (test, LayoutRepr::Builtin(Builtin::Int1)),
+                (expr, LayoutRepr::Builtin(Builtin::Int1)),
             ]),
         );
     }

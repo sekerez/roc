@@ -1,6 +1,7 @@
 use crate::ident::{Ident, ModuleName};
 use crate::module_err::{IdentIdNotFoundSnafu, ModuleIdNotFoundSnafu, ModuleResult};
 use roc_collections::{SmallStringInterner, VecMap};
+use roc_error_macros::internal_error;
 use roc_ident::IdentStr;
 use roc_region::all::Region;
 use snafu::OptionExt;
@@ -115,7 +116,7 @@ impl Symbol {
             .module_ids
             .get_name(self.module_id())
             .unwrap_or_else(|| {
-                panic!(
+                internal_error!(
                     "module_string could not find IdentIds for module {:?} in {:?}",
                     self.module_id(),
                     interns
@@ -128,7 +129,7 @@ impl Symbol {
             .all_ident_ids
             .get(&self.module_id())
             .unwrap_or_else(|| {
-                panic!(
+                internal_error!(
                     "ident_string could not find IdentIds for module {:?} in {:?}",
                     self.module_id(),
                     interns
@@ -136,7 +137,7 @@ impl Symbol {
             });
 
         ident_ids.get_name(self.ident_id()).unwrap_or_else(|| {
-            panic!(
+            internal_error!(
                 "ident_string's IdentIds did not contain an entry for {} in module {:?}",
                 self.ident_id().0,
                 self.module_id()
@@ -267,9 +268,10 @@ impl Interns {
 
     pub fn module_name(&self, module_id: ModuleId) -> &ModuleName {
         self.module_ids.get_name(module_id).unwrap_or_else(|| {
-            panic!(
+            internal_error!(
                 "Unable to find interns entry for module_id {:?} in Interns {:?}",
-                module_id, self
+                module_id,
+                self
             )
         })
     }
@@ -281,16 +283,18 @@ impl Interns {
             Some(ident_ids) => match ident_ids.get_id(ident.as_str()) {
                 Some(ident_id) => Symbol::new(module_id, ident_id),
                 None => {
-                    panic!(
+                    internal_error!(
                         "Interns::symbol could not find ident entry for {:?} for module {:?}",
-                        ident, module_id
+                        ident,
+                        module_id
                     );
                 }
             },
             None => {
-                panic!(
+                internal_error!(
                     "Interns::symbol could not find entry for module {:?} in Interns {:?}",
-                    module_id, self
+                    module_id,
+                    self
                 );
             }
         }
@@ -374,7 +378,7 @@ impl ModuleId {
         interns
             .module_ids
             .get_name(self)
-            .unwrap_or_else(|| panic!("Could not find ModuleIds for {:?}", self))
+            .unwrap_or_else(|| internal_error!("Could not find ModuleIds for {:?}", self))
     }
 }
 
@@ -398,9 +402,10 @@ impl fmt::Debug for ModuleId {
             match names.try_get(self.to_zero_indexed()) {
                 Some(str_ref) => write!(f, "{}", str_ref),
                 None => {
-                    panic!(
+                    internal_error!(
                         "Could not find a Debug name for module ID {} in {:?}",
-                        self.0, names,
+                        self.0,
+                        names,
                     );
                 }
             }
@@ -832,7 +837,7 @@ macro_rules! define_builtins {
                         if cfg!(debug_assertions) {
                             match LENGTH_CHECK {
                                 None => (),
-                                Some((given, expected)) => panic!(
+                                Some((given, expected)) => internal_error!(
                                     "Symbol {} : {} should have index {} based on the insertion order, try {} : {} instead",
                                     given, NAMES[expected], expected, expected, NAMES[expected],
                                 ),
@@ -842,7 +847,7 @@ macro_rules! define_builtins {
                         if cfg!(debug_assertions) {
                             match DUPLICATE_CHECK {
                                 None => (),
-                                Some((first, second)) => panic!(
+                                Some((first, second)) => internal_error!(
                                     "Symbol {} : {} is duplicated at position {}, try removing the duplicate",
                                     first, NAMES[first], second
                                 ),
@@ -1254,6 +1259,11 @@ define_builtins! {
         153 NUM_COUNT_TRAILING_ZERO_BITS: "countTrailingZeroBits"
         154 NUM_COUNT_ONE_BITS: "countOneBits"
         155 NUM_ABS_DIFF: "absDiff"
+        156 NUM_IS_NAN: "isNaN"
+        157 NUM_IS_INFINITE: "isInfinite"
+        158 NUM_IS_FINITE: "isFinite"
+        159 NUM_MIN: "min"
+        160 NUM_MAX: "max"
     }
     4 BOOL: "Bool" => {
         0 BOOL_BOOL: "Bool" exposed_type=true // the Bool.Bool type alias
@@ -1414,6 +1424,7 @@ define_builtins! {
         79 LIST_WALK_FROM_UNTIL: "walkFromUntil"
         80 LIST_ITER_HELP: "iterHelp"
         81 LIST_RELEASE_EXCESS_CAPACITY: "releaseExcessCapacity"
+        82 LIST_UPDATE: "update"
     }
     7 RESULT: "Result" => {
         0 RESULT_RESULT: "Result" exposed_type=true // the Result.Result type alias
@@ -1455,6 +1466,7 @@ define_builtins! {
         21 DICT_UPDATE: "update"
 
         22 DICT_LIST_GET_UNSAFE: "listGetUnsafe"
+        23 DICT_PSEUDO_SEED: "pseudoSeed"
     }
     9 SET: "Set" => {
         0 SET_SET: "Set" exposed_type=true // the Set.Set type alias
@@ -1557,13 +1569,15 @@ define_builtins! {
         13 HASH_HASH_I64: "hashI64"
         14 HASH_HASH_I128: "hashI128"
         15 HASH_HASH_NAT: "hashNat"
-        16 HASH_COMPLETE: "complete"
-        17 HASH_HASH_STR_BYTES: "hashStrBytes"
-        18 HASH_HASH_LIST: "hashList"
-        19 HASH_HASH_UNORDERED: "hashUnordered"
+        16 I128_OF_DEC: "i128OfDec"
+        17 HASH_HASH_DEC: "hashDec"
+        18 HASH_COMPLETE: "complete"
+        19 HASH_HASH_STR_BYTES: "hashStrBytes"
+        20 HASH_HASH_LIST: "hashList"
+        21 HASH_HASH_UNORDERED: "hashUnordered"
     }
-    14 JSON: "Json" => {
-        0 JSON_JSON: "Json"
+    14 JSON: "TotallyNotJson" => {
+        0 JSON_JSON: "TotallyNotJson"
     }
 
     num_modules: 15 // Keep this count up to date by hand! (TODO: see the mut_map! macro for how we could determine this count correctly in the macro)

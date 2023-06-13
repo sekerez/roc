@@ -86,6 +86,8 @@ pub enum LowLevel {
     NumCeiling,
     NumPowInt,
     NumFloor,
+    NumIsNan,
+    NumIsInfinite,
     NumIsFinite,
     NumAtan,
     NumAcos,
@@ -108,6 +110,7 @@ pub enum LowLevel {
     NumCountLeadingZeroBits,
     NumCountTrailingZeroBits,
     NumCountOneBits,
+    I128OfDec,
     Eq,
     NotEq,
     And,
@@ -116,11 +119,15 @@ pub enum LowLevel {
     Hash,
     PtrCast,
     PtrWrite,
-    RefCountInc,
-    RefCountDec,
+    RefCountIncRcPtr,
+    RefCountDecRcPtr,
+    RefCountIncDataPtr,
+    RefCountDecDataPtr,
+    RefCountIsUnique,
     BoxExpr,
     UnboxExpr,
     Unreachable,
+    DictPseudoSeed,
 }
 
 macro_rules! higher_order {
@@ -155,6 +162,7 @@ impl LowLevel {
 /// Some wrapper functions can just be replaced by lowlevels in the backend for performance.
 /// For example, Num.add should be an instruction, not a function call.
 /// Variant names are chosen to help explain what to do when adding new lowlevels
+#[derive(PartialEq, Eq)]
 pub enum LowLevelWrapperType {
     /// This wrapper function contains no logic and we can remove it in code gen
     CanBeReplacedBy(LowLevel),
@@ -221,13 +229,15 @@ macro_rules! map_symbol_to_lowlevel {
                 LowLevel::Hash => unimplemented!(),
                 LowLevel::PtrCast => unimplemented!(),
                 LowLevel::PtrWrite => unimplemented!(),
-                LowLevel::RefCountInc => unimplemented!(),
-                LowLevel::RefCountDec => unimplemented!(),
+                LowLevel::RefCountIncRcPtr => unimplemented!(),
+                LowLevel::RefCountDecRcPtr=> unimplemented!(),
+                LowLevel::RefCountIncDataPtr => unimplemented!(),
+                LowLevel::RefCountDecDataPtr=> unimplemented!(),
+                LowLevel::RefCountIsUnique => unimplemented!(),
 
                 // these are not implemented, not sure why
                 LowLevel::StrFromInt => unimplemented!(),
                 LowLevel::StrFromFloat => unimplemented!(),
-                LowLevel::NumIsFinite => unimplemented!(),
             }
         }
     };
@@ -307,6 +317,9 @@ map_symbol_to_lowlevel! {
     NumLogUnchecked <= NUM_LOG,
     NumRound <= NUM_ROUND,
     NumToFrac <= NUM_TO_FRAC,
+    NumIsNan <= NUM_IS_NAN,
+    NumIsInfinite <= NUM_IS_INFINITE,
+    NumIsFinite <= NUM_IS_FINITE,
     NumPow <= NUM_POW,
     NumCeiling <= NUM_CEILING,
     NumPowInt <= NUM_POW_INT,
@@ -328,10 +341,12 @@ map_symbol_to_lowlevel! {
     NumCountLeadingZeroBits <= NUM_COUNT_LEADING_ZERO_BITS,
     NumCountTrailingZeroBits <= NUM_COUNT_TRAILING_ZERO_BITS,
     NumCountOneBits <= NUM_COUNT_ONE_BITS,
+    I128OfDec <= I128_OF_DEC,
     Eq <= BOOL_STRUCTURAL_EQ,
     NotEq <= BOOL_STRUCTURAL_NOT_EQ,
     And <= BOOL_AND,
     Or <= BOOL_OR,
     Not <= BOOL_NOT,
     Unreachable <= LIST_UNREACHABLE,
+    DictPseudoSeed <= DICT_PSEUDO_SEED,
 }

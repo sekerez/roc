@@ -2010,22 +2010,35 @@ impl Subs {
         result
     }
 
-    pub fn mark_tag_union_recursive(&mut self, recursive: Variable, tags: UnionTags, ext: TagExt) {
+    /// Returns the new recursion variable, which should be introduced to the environment as
+    /// appropriate.
+    #[must_use]
+    pub fn mark_tag_union_recursive(
+        &mut self,
+        recursive: Variable,
+        tags: UnionTags,
+        ext: TagExt,
+    ) -> Variable {
         let (rec_var, new_tags) = self.mark_union_recursive_help(recursive, tags);
 
         let new_ext = ext.map(|v| self.explicit_substitute(recursive, rec_var, v));
         let flat_type = FlatType::RecursiveTagUnion(rec_var, new_tags, new_ext);
 
         self.set_content(recursive, Content::Structure(flat_type));
+
+        rec_var
     }
 
+    /// Returns the new recursion variable, which should be introduced to the environment as
+    /// appropriate.
+    #[must_use]
     pub fn mark_lambda_set_recursive(
         &mut self,
         recursive: Variable,
         solved_lambdas: UnionLambdas,
         unspecialized_lambdas: SubsSlice<Uls>,
         ambient_function_var: Variable,
-    ) {
+    ) -> Variable {
         let (rec_var, new_tags) = self.mark_union_recursive_help(recursive, solved_lambdas);
 
         let new_lambda_set = Content::LambdaSet(LambdaSet {
@@ -2036,6 +2049,8 @@ impl Subs {
         });
 
         self.set_content(recursive, new_lambda_set);
+
+        rec_var
     }
 
     fn mark_union_recursive_help<L: Label>(
@@ -3557,15 +3572,15 @@ fn occurs(
                 }
                 EmptyRecord | EmptyTuple | EmptyTagUnion => Ok(()),
             },
-            Alias(_, args, real_var, _) => {
-                let real_var = *real_var;
+            Alias(_, args, _, _) => {
+                // THEORY: we only need to explore the args, as that is the surface of all
+                // unification between aliases, and hence the only source of new recursion points.
+                //
+                // Recursion points in the definition of the alias are covered by the arguments, or
+                // already resolved during the alias's instantiation.
                 for var_index in args.into_iter() {
                     let var = subs[var_index];
-                    if short_circuit_help(subs, root_var, ctx, var).is_err() {
-                        // Pay the cost and figure out what the actual recursion point is
-
-                        return short_circuit_help(subs, root_var, ctx, real_var);
-                    }
+                    short_circuit_help(subs, root_var, ctx, var)?;
                 }
 
                 Ok(())
@@ -5285,7 +5300,6 @@ pub struct CopiedImport {
     pub rigid: Vec<Variable>,
     pub flex_able: Vec<Variable>,
     pub rigid_able: Vec<Variable>,
-    pub translations: Vec<(Variable, Variable)>,
     pub registered: Vec<Variable>,
 }
 
@@ -5305,7 +5319,6 @@ struct CopyImportEnv<'a> {
     rigid: Vec<Variable>,
     flex_able: Vec<Variable>,
     rigid_able: Vec<Variable>,
-    translations: Vec<(Variable, Variable)>,
     registered: Vec<Variable>,
 }
 
@@ -5333,7 +5346,6 @@ pub fn copy_import_to(
             rigid: Vec::new(),
             flex_able: Vec::new(),
             rigid_able: Vec::new(),
-            translations: Vec::new(),
             registered: Vec::new(),
         };
 
@@ -5347,7 +5359,6 @@ pub fn copy_import_to(
             rigid,
             flex_able,
             rigid_able,
-            translations,
             registered,
             target: _,
             bookkeep_unspecialized_lambda_sets: _,
@@ -5359,7 +5370,6 @@ pub fn copy_import_to(
             rigid,
             flex_able,
             rigid_able,
-            translations,
             registered,
         }
     };
@@ -5653,12 +5663,20 @@ fn copy_import_to_help(env: &mut CopyImportEnv<'_>, max_rank: Rank, var: Variabl
             let name = env.source.field_names[name_index.index as usize].clone();
             let new_name_index = SubsIndex::push_new(&mut env.target.field_names, name);
 
-            env.target
-                .set(copy, make_descriptor(RigidVar(new_name_index)));
+            // If we are copying the import as generalized, we can keep it as rigid.
+            // Otherwise we must make it flex, as this is copying to a non-generalized site.
+            //
+            // The rigid distinction is never necessary for imports, since their types have already
+            // been checked completely.
+            let content = if max_rank.is_generalized() {
+                RigidVar(new_name_index)
+            } else {
+                FlexVar(Some(new_name_index))
+            };
+
+            env.target.set(copy, make_descriptor(content));
 
             env.rigid.push(copy);
-
-            env.translations.push((var, copy));
 
             copy
         }
@@ -5672,14 +5690,20 @@ fn copy_import_to_help(env: &mut CopyImportEnv<'_>, max_rank: Rank, var: Variabl
                 env.source.get_subs_slice(abilities).iter().copied(),
             );
 
-            env.target.set(
-                copy,
-                make_descriptor(RigidAbleVar(new_name_index, new_abilities)),
-            );
+            // If we are copying the import as generalized, we can keep it as rigid.
+            // Otherwise we must make it flex, as this is copying to a non-generalized site.
+            //
+            // The rigid distinction is never necessary for imports, since their types have already
+            // been checked completely.
+            let content = if max_rank.is_generalized() {
+                RigidAbleVar(new_name_index, new_abilities)
+            } else {
+                FlexAbleVar(Some(new_name_index), new_abilities)
+            };
+
+            env.target.set(copy, make_descriptor(content));
 
             env.rigid_able.push(copy);
-
-            env.translations.push((var, copy));
 
             copy
         }

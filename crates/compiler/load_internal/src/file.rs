@@ -19,8 +19,8 @@ use roc_constrain::module::constrain_module;
 use roc_debug_flags::dbg_do;
 #[cfg(debug_assertions)]
 use roc_debug_flags::{
-    ROC_CHECK_MONO_IR, ROC_PRINT_IR_AFTER_REFCOUNT, ROC_PRINT_IR_AFTER_RESET_REUSE,
-    ROC_PRINT_IR_AFTER_SPECIALIZATION, ROC_PRINT_LOAD_LOG,
+    ROC_CHECK_MONO_IR, ROC_PRINT_IR_AFTER_DROP_SPECIALIZATION, ROC_PRINT_IR_AFTER_REFCOUNT,
+    ROC_PRINT_IR_AFTER_RESET_REUSE, ROC_PRINT_IR_AFTER_SPECIALIZATION, ROC_PRINT_LOAD_LOG,
 };
 use roc_derive::SharedDerivedModule;
 use roc_error_macros::internal_error;
@@ -30,16 +30,16 @@ use roc_module::symbol::{
     IdentIds, IdentIdsByModule, Interns, ModuleId, ModuleIds, PQModuleName, PackageModuleIds,
     PackageQualified, Symbol,
 };
-use roc_mono::inc_dec;
 use roc_mono::ir::{
     CapturedSymbols, ExternalSpecializations, GlueLayouts, LambdaSetId, PartialProc, Proc,
-    ProcLayout, Procs, ProcsBase, UpdateModeIds,
+    ProcLayout, Procs, ProcsBase, UpdateModeIds, UsageTrackingMap,
 };
 use roc_mono::layout::LayoutInterner;
 use roc_mono::layout::{
     GlobalLayoutInterner, LambdaName, Layout, LayoutCache, LayoutProblem, Niche, STLayoutInterner,
 };
 use roc_mono::reset_reuse;
+use roc_mono::{drop_specialization, inc_dec};
 use roc_packaging::cache::RocCacheDir;
 use roc_parse::ast::{
     self, CommentOrNewline, Defs, Expr, ExtractSpaces, Pattern, Spaced, StrLiteral, TypeAnnotation,
@@ -53,6 +53,8 @@ use roc_parse::module::module_defs;
 use roc_parse::parser::{FileError, Parser, SourceError, SyntaxError};
 use roc_problem::Severity;
 use roc_region::all::{LineInfo, Loc, Region};
+#[cfg(not(target_family = "wasm"))]
+use roc_reporting::report::to_https_problem_report_string;
 use roc_reporting::report::{to_file_problem_report_string, Palette, RenderTarget};
 use roc_solve::module::{extract_module_owned_implementations, Solved, SolvedModule};
 use roc_solve_problem::TypeError;
@@ -72,7 +74,7 @@ use std::{env, fs};
 #[cfg(not(target_family = "wasm"))]
 use {
     roc_packaging::cache::{self},
-    roc_packaging::https::PackageMetadata,
+    roc_packaging::https::{PackageMetadata, Problem},
 };
 
 pub use crate::work::Phase;
@@ -2454,11 +2456,11 @@ fn update<'a>(
                                     }
                                 }
                                 Err(url_err) => {
-                                    todo!(
-                                        "Gracefully report URL error for {:?} - {:?}",
+                                    let buf = to_https_problem_report_string(
                                         url,
-                                        url_err
+                                        Problem::InvalidUrl(url_err),
                                     );
+                                    return Err(LoadingProblem::FormattedReport(buf));
                                 }
                             }
                         }
@@ -3110,11 +3112,26 @@ fn update<'a>(
 
                     debug_print_ir!(state, &layout_interner, ROC_PRINT_IR_AFTER_REFCOUNT);
 
+                    drop_specialization::specialize_drops(
+                        arena,
+                        &mut layout_interner,
+                        module_id,
+                        ident_ids,
+                        &mut state.procedures,
+                    );
+
+                    debug_print_ir!(
+                        state,
+                        &layout_interner,
+                        ROC_PRINT_IR_AFTER_DROP_SPECIALIZATION
+                    );
+
                     reset_reuse::insert_reset_reuse_operations(
                         arena,
                         &layout_interner,
                         module_id,
                         ident_ids,
+                        state.target_info,
                         &mut update_mode_ids,
                         &mut state.procedures,
                     );
@@ -3422,7 +3439,7 @@ fn finish_specialization<'a>(
                 );
 
                 let lambda_set_names = all_glue_procs
-                    .extern_names
+                    .legacy_layout_based_extern_names
                     .iter()
                     .map(|(lambda_set_id, _)| (*_name, *lambda_set_id));
                 exposed_to_host.lambda_sets.extend(lambda_set_names);
@@ -3830,7 +3847,7 @@ fn load_module<'a>(
         "Encode", ModuleId::ENCODE
         "Decode", ModuleId::DECODE
         "Hash", ModuleId::HASH
-        "Json", ModuleId::JSON
+        "TotallyNotJson", ModuleId::JSON
     }
 
     let (filename, opt_shorthand) = module_name_to_path(src_dir, &module_name, arc_shorthands);
@@ -4314,17 +4331,22 @@ fn load_packages<'a>(
                 // TODO we should do this async; however, with the current
                 // architecture of file.rs (which doesn't use async/await),
                 // this would be very difficult!
-                let (package_dir, opt_root_module) = cache::install_package(roc_cache_dir, src)
-                    .unwrap_or_else(|err| {
-                        todo!("TODO gracefully handle package install error {:?}", err);
-                    });
+                match cache::install_package(roc_cache_dir, src) {
+                    Ok((package_dir, opt_root_module)) => {
+                        // You can optionally specify the root module using the URL fragment,
+                        // e.g. #foo.roc
+                        // (defaults to main.roc)
+                        match opt_root_module {
+                            Some(root_module) => package_dir.join(root_module),
+                            None => package_dir.join("main.roc"),
+                        }
+                    }
+                    Err(problem) => {
+                        let buf = to_https_problem_report_string(src, problem);
 
-                // You can optionally specify the root module using the URL fragment,
-                // e.g. #foo.roc
-                // (defaults to main.roc)
-                match opt_root_module {
-                    Some(root_module) => package_dir.join(root_module),
-                    None => package_dir.join("main.roc"),
+                        load_messages.push(Msg::FailedToLoad(LoadingProblem::FormattedReport(buf)));
+                        return;
+                    }
                 }
             }
 
@@ -5767,6 +5789,7 @@ fn make_specializations<'a>(
         abilities: AbilitiesView::World(&world_abilities),
         exposed_by_module,
         derived_module: &derived_module,
+        struct_indexing: UsageTrackingMap::default(),
     };
 
     let mut procs = Procs::new_in(arena);
@@ -5867,6 +5890,7 @@ fn build_pending_specializations<'a>(
         abilities: AbilitiesView::Module(&abilities_store),
         exposed_by_module,
         derived_module: &derived_module,
+        struct_indexing: UsageTrackingMap::default(),
     };
 
     let layout_cache_snapshot = layout_cache.snapshot();
@@ -6348,6 +6372,7 @@ fn load_derived_partial_procs<'a>(
             abilities: AbilitiesView::World(world_abilities),
             exposed_by_module,
             derived_module,
+            struct_indexing: UsageTrackingMap::default(),
         };
 
         let partial_proc = match derived_expr {

@@ -4,7 +4,7 @@ use std::hash::Hash;
 use crate::ir::{
     Expr, HigherOrderLowLevel, JoinPointId, Param, PassedFunction, Proc, ProcLayout, Stmt,
 };
-use crate::layout::{InLayout, Layout, LayoutInterner, STLayoutInterner};
+use crate::layout::{InLayout, LayoutInterner, LayoutRepr, STLayoutInterner};
 use bumpalo::collections::Vec;
 use bumpalo::Bump;
 use roc_collections::all::{MutMap, MutSet};
@@ -29,7 +29,7 @@ impl Ownership {
 
     /// For reference-counted types (lists, (big) strings, recursive tags), owning a value
     /// means incrementing its reference count. Hence, we prefer borrowing for these types
-    fn from_layout(layout: &Layout) -> Self {
+    fn from_layout(layout: &LayoutRepr) -> Self {
         match layout.is_refcounted() {
             true => Ownership::Borrowed,
             false => Ownership::Owned,
@@ -265,7 +265,7 @@ impl<'a> ParamMap<'a> {
     ) -> &'a [Param<'a>] {
         Vec::from_iter_in(
             ps.iter().map(|p| Param {
-                ownership: Ownership::from_layout(&interner.get(p.layout)),
+                ownership: Ownership::from_layout(&interner.get_repr(p.layout)),
                 layout: p.layout,
                 symbol: p.symbol,
             }),
@@ -281,7 +281,7 @@ impl<'a> ParamMap<'a> {
     ) -> &'a [Param<'a>] {
         Vec::from_iter_in(
             ps.iter().map(|(layout, symbol)| Param {
-                ownership: Ownership::from_layout(&interner.get(*layout)),
+                ownership: Ownership::from_layout(&interner.get_repr(*layout)),
                 layout: *layout,
                 symbol: *symbol,
             }),
@@ -947,6 +947,7 @@ pub fn lowlevel_borrow_signature(arena: &Bump, op: LowLevel) -> &[Ownership] {
     // - other refcounted arguments are Borrowed
     match op {
         Unreachable => arena.alloc_slice_copy(&[irrelevant]),
+        DictPseudoSeed => arena.alloc_slice_copy(&[irrelevant]),
         ListLen | StrIsEmpty | StrToScalars | StrCountGraphemes | StrGraphemes
         | StrCountUtf8Bytes | StrGetCapacity | ListGetCapacity => {
             arena.alloc_slice_copy(&[borrowed])
@@ -1002,6 +1003,8 @@ pub fn lowlevel_borrow_signature(arena: &Bump, op: LowLevel) -> &[Ownership] {
         | NumFloor
         | NumToFrac
         | Not
+        | NumIsNan
+        | NumIsInfinite
         | NumIsFinite
         | NumAtan
         | NumAcos
@@ -1012,7 +1015,8 @@ pub fn lowlevel_borrow_signature(arena: &Bump, op: LowLevel) -> &[Ownership] {
         | NumToFloatChecked
         | NumCountLeadingZeroBits
         | NumCountTrailingZeroBits
-        | NumCountOneBits => arena.alloc_slice_copy(&[irrelevant]),
+        | NumCountOneBits
+        | I128OfDec => arena.alloc_slice_copy(&[irrelevant]),
         NumBytesToU16 => arena.alloc_slice_copy(&[borrowed, irrelevant]),
         NumBytesToU32 => arena.alloc_slice_copy(&[borrowed, irrelevant]),
         NumBytesToU64 => arena.alloc_slice_copy(&[borrowed, irrelevant]),
@@ -1031,7 +1035,8 @@ pub fn lowlevel_borrow_signature(arena: &Bump, op: LowLevel) -> &[Ownership] {
             unreachable!("These lowlevel operations are turned into mono Expr's")
         }
 
-        PtrCast | PtrWrite | RefCountInc | RefCountDec => {
+        PtrCast | PtrWrite | RefCountIncRcPtr | RefCountDecRcPtr | RefCountIncDataPtr
+        | RefCountDecDataPtr | RefCountIsUnique => {
             unreachable!("Only inserted *after* borrow checking: {:?}", op);
         }
     }

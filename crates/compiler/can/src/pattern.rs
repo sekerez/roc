@@ -322,7 +322,7 @@ pub fn canonicalize_def_header_pattern<'a>(
 pub struct PermitShadows(pub bool);
 
 fn canonicalize_pattern_symbol(
-    env: &mut Env<'_>,
+    env: &mut Env,
     scope: &mut Scope,
     output: &mut Output,
     region: Region,
@@ -378,6 +378,12 @@ pub fn canonicalize_pattern<'a>(
                 Ok(symbol) => Pattern::Identifier(symbol),
                 Err(pattern) => pattern,
             }
+        }
+        Underscore(name) => {
+            // An underscored identifier can't be used, but we'll still add it to the scope
+            // for better error messages if someone tries to use it.
+            scope.introduce_ignored_local(name, region);
+            Pattern::Underscore
         }
         Tag(name) => {
             // Canonicalize the tag's name.
@@ -478,8 +484,6 @@ pub fn canonicalize_pattern<'a>(
             },
             ptype => unsupported_pattern(env, ptype, region),
         },
-
-        Underscore(_) => Pattern::Underscore,
 
         &NumLiteral(str) => match pattern_type {
             WhenBranch => match finish_parsing_num(str) {

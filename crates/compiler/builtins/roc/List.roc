@@ -4,6 +4,7 @@ interface List
         get,
         set,
         replace,
+        update,
         append,
         map,
         len,
@@ -72,7 +73,8 @@ interface List
         Num.{ Nat, Num, Int },
     ]
 
-## Types
+## ## Types
+##
 ## A sequential list of values.
 ## ```
 ## [1, 2, 3] # a list of numbers
@@ -249,6 +251,50 @@ replace = \list, index, newValue ->
 set : List a, Nat, a -> List a
 set = \list, index, value ->
     (List.replace list index value).list
+
+## Updates the element at the given index with the given function.
+## ```
+## List.update [1, 2, 3] 1 (\x -> x + 1)
+## ```
+## If the given index is outside the bounds of the list, returns the original
+## list unmodified.
+##
+## To replace the element at a given index, instead of updating based on the current value,
+## see [List.set] and [List.replace]
+update : List a, Nat, (a -> a) -> List a
+update = \list, index, func ->
+    when List.get list index is
+        Err OutOfBounds -> list
+        Ok value ->
+            newValue = func value
+            (replaceUnsafe list index newValue).list
+
+# Update one element in bounds
+expect
+    list : List Nat
+    list = [1, 2, 3]
+    got = update list 1 (\x -> x + 42)
+    want = [1, 44, 3]
+    got == want
+
+# Update out of bounds
+expect
+    list : List Nat
+    list = [1, 2, 3]
+    got = update list 5 (\x -> x + 42)
+    got == list
+
+# Update chain
+expect
+    list : List Nat
+    list = [1, 2, 3]
+    got =
+        list
+        |> update 0 (\x -> x + 10)
+        |> update 1 (\x -> x + 20)
+        |> update 2 (\x -> x + 30)
+    want = [11, 22, 33]
+    got == want
 
 ## Add a single element to the end of a list.
 ## ```
@@ -512,7 +558,7 @@ all = \list, predicate ->
 ## length that's too low, it would have to re-allocate.
 ##
 ## (If you want to do an operation like this which reduces the memory footprint
-## of the resulting list, you can do two passes over the lis with [List.walk] - one
+## of the resulting list, you can do two passes over the list with [List.walk] - one
 ## to calculate the precise new size, and another to populate the new list.)
 ##
 ## If given a unique list, [List.keepIf] will mutate it in place to assemble the appropriate list.
@@ -1016,7 +1062,7 @@ sublistLowlevel : List elem, Nat, Nat -> List elem
 
 ## Intersperses `sep` between the elements of `list`
 ## ```
-## List.intersperse 9 [1, 2, 3]     # [1, 9, 2, 9, 3]
+## List.intersperse [1, 2, 3] 9     # [1, 9, 2, 9, 3]
 ## ```
 intersperse : List elem, elem -> List elem
 intersperse = \list, sep ->

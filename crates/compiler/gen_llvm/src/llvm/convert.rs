@@ -6,12 +6,13 @@ use inkwell::values::StructValue;
 use inkwell::AddressSpace;
 use roc_builtins::bitcode::{FloatWidth, IntWidth};
 use roc_mono::layout::{
-    round_up_to_alignment, Builtin, InLayout, Layout, LayoutInterner, STLayoutInterner, UnionLayout,
+    round_up_to_alignment, Builtin, InLayout, Layout, LayoutInterner, LayoutRepr, STLayoutInterner,
+    UnionLayout,
 };
 use roc_target::TargetInfo;
 
-fn basic_type_from_record<'a, 'ctx, 'env>(
-    env: &Env<'a, 'ctx, 'env>,
+fn basic_type_from_record<'a, 'ctx>(
+    env: &Env<'a, 'ctx, '_>,
     layout_interner: &mut STLayoutInterner<'a>,
     fields: &[InLayout<'_>],
 ) -> BasicTypeEnum<'ctx> {
@@ -33,13 +34,10 @@ pub fn basic_type_from_layout<'a, 'ctx, 'env>(
     layout_interner: &'env mut STLayoutInterner<'a>,
     layout: InLayout<'_>,
 ) -> BasicTypeEnum<'ctx> {
-    use Layout::*;
+    use LayoutRepr::*;
 
-    match layout_interner.get(layout) {
-        Struct {
-            field_layouts: sorted_fields,
-            ..
-        } => basic_type_from_record(env, layout_interner, sorted_fields),
+    match layout_interner.get_repr(layout) {
+        Struct(sorted_fields, ..) => basic_type_from_record(env, layout_interner, sorted_fields),
         LambdaSet(lambda_set) => {
             basic_type_from_layout(env, layout_interner, lambda_set.runtime_representation())
         }
@@ -59,8 +57,8 @@ pub fn basic_type_from_layout<'a, 'ctx, 'env>(
     }
 }
 
-pub fn struct_type_from_union_layout<'a, 'ctx, 'env>(
-    env: &Env<'a, 'ctx, 'env>,
+pub fn struct_type_from_union_layout<'a, 'ctx>(
+    env: &Env<'a, 'ctx, '_>,
     layout_interner: &mut STLayoutInterner<'a>,
     union_layout: &UnionLayout<'_>,
 ) -> StructType<'ctx> {
@@ -98,8 +96,8 @@ pub fn struct_type_from_union_layout<'a, 'ctx, 'env>(
     }
 }
 
-pub fn basic_type_from_union_layout<'a, 'ctx, 'env>(
-    env: &Env<'a, 'ctx, 'env>,
+pub fn basic_type_from_union_layout<'a, 'ctx>(
+    env: &Env<'a, 'ctx, '_>,
     layout_interner: &mut STLayoutInterner<'a>,
     union_layout: &UnionLayout<'_>,
 ) -> BasicTypeEnum<'ctx> {
@@ -116,8 +114,8 @@ pub fn basic_type_from_union_layout<'a, 'ctx, 'env>(
     }
 }
 
-pub fn basic_type_from_builtin<'a, 'ctx, 'env>(
-    env: &Env<'a, 'ctx, 'env>,
+pub fn basic_type_from_builtin<'ctx>(
+    env: &Env<'_, 'ctx, '_>,
     builtin: &Builtin<'_>,
 ) -> BasicTypeEnum<'ctx> {
     use Builtin::*;
@@ -145,14 +143,14 @@ pub fn basic_type_from_builtin<'a, 'ctx, 'env>(
 ///
 /// Ideas exist to have (bigger than 2 register) records also be passed by-reference, but this
 /// is not currently implemented
-pub fn argument_type_from_layout<'a, 'ctx, 'env>(
-    env: &Env<'a, 'ctx, 'env>,
+pub fn argument_type_from_layout<'a, 'ctx>(
+    env: &Env<'a, 'ctx, '_>,
     layout_interner: &mut STLayoutInterner<'a>,
     layout: InLayout<'a>,
 ) -> BasicTypeEnum<'ctx> {
-    use Layout::*;
+    use LayoutRepr::*;
 
-    match layout_interner.get(layout) {
+    match layout_interner.get_repr(layout) {
         LambdaSet(lambda_set) => {
             argument_type_from_layout(env, layout_interner, lambda_set.runtime_representation())
         }
@@ -171,8 +169,8 @@ pub fn argument_type_from_layout<'a, 'ctx, 'env>(
 }
 
 /// Non-recursive tag unions are stored on the stack, but passed by-reference
-pub fn argument_type_from_union_layout<'a, 'ctx, 'env>(
-    env: &Env<'a, 'ctx, 'env>,
+pub fn argument_type_from_union_layout<'a, 'ctx>(
+    env: &Env<'a, 'ctx, '_>,
     layout_interner: &mut STLayoutInterner<'a>,
     union_layout: &UnionLayout<'_>,
 ) -> BasicTypeEnum<'ctx> {
@@ -185,8 +183,8 @@ pub fn argument_type_from_union_layout<'a, 'ctx, 'env>(
     }
 }
 
-pub fn int_type_from_int_width<'a, 'ctx, 'env>(
-    env: &Env<'a, 'ctx, 'env>,
+pub fn int_type_from_int_width<'ctx>(
+    env: &Env<'_, 'ctx, '_>,
     int_width: IntWidth,
 ) -> IntType<'ctx> {
     use IntWidth::*;
@@ -200,8 +198,8 @@ pub fn int_type_from_int_width<'a, 'ctx, 'env>(
     }
 }
 
-pub fn float_type_from_float_width<'a, 'ctx, 'env>(
-    env: &Env<'a, 'ctx, 'env>,
+pub fn float_type_from_float_width<'ctx>(
+    env: &Env<'_, 'ctx, '_>,
     float_width: FloatWidth,
 ) -> FloatType<'ctx> {
     use FloatWidth::*;
@@ -431,27 +429,27 @@ pub fn str_list_int(ctx: &Context, target_info: TargetInfo) -> IntType<'_> {
     }
 }
 
-pub fn zig_list_type<'a, 'ctx, 'env>(env: &Env<'a, 'ctx, 'env>) -> StructType<'ctx> {
+pub fn zig_list_type<'ctx>(env: &Env<'_, 'ctx, '_>) -> StructType<'ctx> {
     env.module.get_struct_type("list.RocList").unwrap()
 }
 
-pub fn zig_str_type<'a, 'ctx, 'env>(env: &Env<'a, 'ctx, 'env>) -> StructType<'ctx> {
+pub fn zig_str_type<'ctx>(env: &Env<'_, 'ctx, '_>) -> StructType<'ctx> {
     env.module.get_struct_type("str.RocStr").unwrap()
 }
 
-pub fn zig_dec_type<'a, 'ctx, 'env>(env: &Env<'a, 'ctx, 'env>) -> StructType<'ctx> {
+pub fn zig_dec_type<'ctx>(env: &Env<'_, 'ctx, '_>) -> StructType<'ctx> {
     env.module.get_struct_type("dec.RocDec").unwrap()
 }
 
-pub fn zig_has_tag_id_type<'a, 'ctx, 'env>(env: &Env<'a, 'ctx, 'env>) -> StructType<'ctx> {
+pub fn zig_has_tag_id_type<'ctx>(env: &Env<'_, 'ctx, '_>) -> StructType<'ctx> {
     let u8_ptr_t = env.context.i8_type().ptr_type(AddressSpace::default());
 
     env.context
         .struct_type(&[env.context.bool_type().into(), u8_ptr_t.into()], false)
 }
 
-pub fn zig_num_parse_result_type<'a, 'ctx, 'env>(
-    env: &Env<'a, 'ctx, 'env>,
+pub fn zig_num_parse_result_type<'ctx>(
+    env: &Env<'_, 'ctx, '_>,
     type_name: &str,
 ) -> StructType<'ctx> {
     let name = format!("num.NumParseResult({type_name})");
@@ -462,8 +460,8 @@ pub fn zig_num_parse_result_type<'a, 'ctx, 'env>(
     }
 }
 
-pub fn zig_to_int_checked_result_type<'a, 'ctx, 'env>(
-    env: &Env<'a, 'ctx, 'env>,
+pub fn zig_to_int_checked_result_type<'ctx>(
+    env: &Env<'_, 'ctx, '_>,
     type_name: &str,
 ) -> StructType<'ctx> {
     let name = format!("num.ToIntCheckedResult({type_name})");
@@ -474,7 +472,7 @@ pub fn zig_to_int_checked_result_type<'a, 'ctx, 'env>(
     }
 }
 
-pub fn zig_with_overflow_roc_dec<'a, 'ctx, 'env>(env: &Env<'a, 'ctx, 'env>) -> StructType<'ctx> {
+pub fn zig_with_overflow_roc_dec<'ctx>(env: &Env<'_, 'ctx, '_>) -> StructType<'ctx> {
     env.module
         .get_struct_type("utils.WithOverflow(dec.RocDec)")
         .unwrap()
