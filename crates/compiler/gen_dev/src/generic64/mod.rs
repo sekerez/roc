@@ -2010,6 +2010,9 @@ impl<
             self.load_literal(&data, &Layout::U64, &Literal::Int(0u128.to_be_bytes()));
         }
 
+        let ptr = Layout::U64;
+        let usize_ = Layout::U64;
+
         match higher_order.op {
             HigherOrder::ListMap { xs } => {
                 let old_element_layout = argument_layouts[0];
@@ -2061,9 +2064,6 @@ impl<
                     new_element_width,
                 ];
 
-                let ptr = Layout::U64;
-                let usize_ = Layout::U64;
-
                 let layouts = [
                     input_list_in_layout,
                     ptr,
@@ -2075,32 +2075,16 @@ impl<
                     usize_,
                 ];
 
-                // Setup the return location.
-                let base_offset = self
-                    .storage_manager
-                    .claim_stack_area(dst, self.layout_interner.stack_size(ret_layout));
-
-                self.build_fn_call(
-                    &Symbol::DEV_TMP3,
+                self.build_fn_call_stack_return(
                     bitcode::LIST_MAP.to_string(),
                     &arguments,
                     &layouts,
-                    &ret_layout,
+                    ret_layout,
+                    *dst,
                 );
 
                 self.free_symbol(&Symbol::DEV_TMP);
                 self.free_symbol(&Symbol::DEV_TMP2);
-
-                // Return list value from fn call
-                self.storage_manager.copy_symbol_to_stack_offset(
-                    self.layout_interner,
-                    &mut self.buf,
-                    base_offset,
-                    &Symbol::DEV_TMP3,
-                    &ret_layout,
-                );
-
-                self.free_symbol(&Symbol::DEV_TMP3);
             }
             HigherOrder::ListMap2 { xs, ys } => {
                 let old_element_layout1 = argument_layouts[0];
@@ -2170,9 +2154,6 @@ impl<
                     dec2,
                 ];
 
-                let ptr = Layout::U64;
-                let usize_ = Layout::U64;
-
                 let layouts = [
                     input_list_in_layout1,
                     input_list_in_layout2,
@@ -2188,32 +2169,16 @@ impl<
                     ptr, // dec2
                 ];
 
-                // Setup the return location.
-                let base_offset = self
-                    .storage_manager
-                    .claim_stack_area(dst, self.layout_interner.stack_size(ret_layout));
-
-                self.build_fn_call(
-                    &Symbol::DEV_TMP4,
+                self.build_fn_call_stack_return(
                     bitcode::LIST_MAP2.to_string(),
                     &arguments,
                     &layouts,
-                    &ret_layout,
+                    ret_layout,
+                    *dst,
                 );
 
                 self.free_symbol(&Symbol::DEV_TMP);
                 self.free_symbol(&Symbol::DEV_TMP2);
-
-                // Return list value from fn call
-                self.storage_manager.copy_symbol_to_stack_offset(
-                    self.layout_interner,
-                    &mut self.buf,
-                    base_offset,
-                    &Symbol::DEV_TMP4,
-                    &ret_layout,
-                );
-
-                self.free_symbol(&Symbol::DEV_TMP4);
             }
             HigherOrder::ListMap3 { xs, ys, zs } => {
                 let old_element_layout1 = argument_layouts[0];
@@ -2295,9 +2260,6 @@ impl<
                     dec3,
                 ];
 
-                let ptr = Layout::U64;
-                let usize_ = Layout::U64;
-
                 let layouts = [
                     input_list_in_layout1,
                     input_list_in_layout2,
@@ -2316,32 +2278,16 @@ impl<
                     ptr,    // dec3
                 ];
 
-                // Setup the return location.
-                let base_offset = self
-                    .storage_manager
-                    .claim_stack_area(dst, self.layout_interner.stack_size(ret_layout));
-
-                self.build_fn_call(
-                    &Symbol::DEV_TMP3,
+                self.build_fn_call_stack_return(
                     bitcode::LIST_MAP3.to_string(),
                     &arguments,
                     &layouts,
-                    &ret_layout,
+                    ret_layout,
+                    *dst,
                 );
 
                 self.free_symbol(&Symbol::DEV_TMP);
                 self.free_symbol(&Symbol::DEV_TMP2);
-
-                // Return list value from fn call
-                self.storage_manager.copy_symbol_to_stack_offset(
-                    self.layout_interner,
-                    &mut self.buf,
-                    base_offset,
-                    &Symbol::DEV_TMP3,
-                    &ret_layout,
-                );
-
-                self.free_symbol(&Symbol::DEV_TMP3);
             }
             HigherOrder::ListMap4 { xs, ys, zs, ws } => {
                 let old_element_layout1 = argument_layouts[0];
@@ -2424,9 +2370,6 @@ impl<
                     dec4,
                 ];
 
-                let ptr = Layout::U64;
-                let usize_ = Layout::U64;
-
                 let layouts = [
                     input_list_in_layout1,
                     input_list_in_layout2,
@@ -2448,32 +2391,16 @@ impl<
                     ptr,    // dec4
                 ];
 
-                // Setup the return location.
-                let base_offset = self
-                    .storage_manager
-                    .claim_stack_area(dst, self.layout_interner.stack_size(ret_layout));
-
-                self.build_fn_call(
-                    &Symbol::DEV_TMP3,
+                self.build_fn_call_stack_return(
                     bitcode::LIST_MAP4.to_string(),
                     &arguments,
                     &layouts,
-                    &ret_layout,
+                    ret_layout,
+                    *dst,
                 );
 
                 self.free_symbol(&Symbol::DEV_TMP);
                 self.free_symbol(&Symbol::DEV_TMP2);
-
-                // Return list value from fn call
-                self.storage_manager.copy_symbol_to_stack_offset(
-                    self.layout_interner,
-                    &mut self.buf,
-                    base_offset,
-                    &Symbol::DEV_TMP3,
-                    &ret_layout,
-                );
-
-                self.free_symbol(&Symbol::DEV_TMP3);
             }
             HigherOrder::ListSortWith { xs } => todo!(),
         }
@@ -4393,6 +4320,41 @@ impl<
         CC: CallConv<GeneralReg, FloatReg, ASM>,
     > Backend64Bit<'a, 'r, GeneralReg, FloatReg, ASM, CC>
 {
+    fn build_fn_call_stack_return<const N: usize>(
+        &mut self,
+        function_name: String,
+        arguments: &[Symbol; N],
+        layouts: &[InLayout<'a>; N],
+        ret_layout: InLayout<'a>,
+        dst: Symbol,
+    ) {
+        // Setup the return location.
+        let base_offset = self
+            .storage_manager
+            .claim_stack_area(&dst, self.layout_interner.stack_size(ret_layout));
+
+        let tmp = self.debug_symbol("call_with_stack_return_result");
+
+        self.build_fn_call(
+            &tmp,
+            function_name,
+            arguments.as_slice(),
+            layouts.as_slice(),
+            &ret_layout,
+        );
+
+        // Return list value from fn call
+        self.storage_manager.copy_symbol_to_stack_offset(
+            self.layout_interner,
+            &mut self.buf,
+            base_offset,
+            &tmp,
+            &ret_layout,
+        );
+
+        self.free_symbol(&tmp);
+    }
+
     fn clear_tag_id(&mut self, ptr_reg: GeneralReg) -> (Symbol, GeneralReg) {
         let unmasked_symbol = self.debug_symbol("unmasked");
         let unmasked_reg = self
