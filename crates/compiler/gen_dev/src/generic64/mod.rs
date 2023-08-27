@@ -1971,10 +1971,44 @@ impl<
             higher_order.closure_env_layout,
         );
 
+        let caller = self.debug_symbol("caller");
+        let caller_string = self.lambda_name_to_string(
+            LambdaName::no_niche(caller_proc.proc_symbol),
+            std::iter::empty(),
+            None,
+            Layout::UNIT,
+        );
+
+        self.caller_procs.push(caller_proc);
+
         let argument_layouts = match higher_order.closure_env_layout {
             None => &higher_order.passed_function.argument_layouts,
             Some(_) => &higher_order.passed_function.argument_layouts[1..],
         };
+
+        // function pointer to a function that takes a pointer, and increments
+        let inc_n_data = if let Some(closure_env_layout) = higher_order.closure_env_layout {
+            self.increment_fn_pointer(closure_env_layout)
+        } else {
+            // null pointer
+            self.load_literal_i64(&Symbol::DEV_TMP, 0);
+            Symbol::DEV_TMP
+        };
+
+        let data = self.debug_symbol("data");
+        if let Some(_closure_data_layout) = higher_order.closure_env_layout {
+            let data_symbol = higher_order.passed_function.captured_environment;
+            self.storage_manager
+                .ensure_symbol_on_stack(&mut self.buf, &data_symbol);
+            let (new_elem_offset, _) = self.storage_manager.stack_offset_and_size(&data_symbol);
+
+            // Load address of output element into register.
+            let reg = self.storage_manager.claim_general_reg(&mut self.buf, &data);
+            ASM::add_reg64_reg64_imm32(&mut self.buf, reg, CC::BASE_PTR_REG, new_elem_offset);
+        } else {
+            // use a null pointer
+            self.load_literal(&data, &Layout::U64, &Literal::Int(0u128.to_be_bytes()));
+        }
 
         match higher_order.op {
             HigherOrder::ListMap { xs } => {
@@ -1986,8 +2020,6 @@ impl<
                     .layout_interner
                     .insert_direct_no_semantic(input_list_layout);
 
-                let caller = self.debug_symbol("caller");
-                let data = self.debug_symbol("data");
                 let alignment = self.debug_symbol("alignment");
                 let old_element_width = self.debug_symbol("old_element_width");
                 let new_element_width = self.debug_symbol("new_element_width");
@@ -1997,46 +2029,7 @@ impl<
                 self.load_layout_stack_size(old_element_layout, old_element_width);
                 self.load_layout_stack_size(new_element_layout, new_element_width);
 
-                let caller_string = self.lambda_name_to_string(
-                    LambdaName::no_niche(caller_proc.proc_symbol),
-                    std::iter::empty(),
-                    None,
-                    Layout::UNIT,
-                );
-
-                // self.helper_proc_symbols .extend([(caller_proc.proc_symbol, caller_proc.proc_layout)]);
-                self.caller_procs.push(caller_proc);
-
-                // function pointer to a function that takes a pointer, and increments
-                let inc_n_data = if let Some(closure_env_layout) = higher_order.closure_env_layout {
-                    self.increment_fn_pointer(closure_env_layout)
-                } else {
-                    // null pointer
-                    self.load_literal_i64(&Symbol::DEV_TMP, 0);
-                    Symbol::DEV_TMP
-                };
-
                 self.build_fn_pointer(&caller, caller_string);
-
-                if let Some(_closure_data_layout) = higher_order.closure_env_layout {
-                    let data_symbol = higher_order.passed_function.captured_environment;
-                    self.storage_manager
-                        .ensure_symbol_on_stack(&mut self.buf, &data_symbol);
-                    let (new_elem_offset, _) =
-                        self.storage_manager.stack_offset_and_size(&data_symbol);
-
-                    // Load address of output element into register.
-                    let reg = self.storage_manager.claim_general_reg(&mut self.buf, &data);
-                    ASM::add_reg64_reg64_imm32(
-                        &mut self.buf,
-                        reg,
-                        CC::BASE_PTR_REG,
-                        new_elem_offset,
-                    );
-                } else {
-                    // use a null pointer
-                    self.load_literal(&data, &Layout::U64, &Literal::Int(0u128.to_be_bytes()));
-                }
 
                 // we pass a null pointer when the data is not owned. the zig code must not call this!
                 let data_is_owned = higher_order.closure_env_layout.is_some()
@@ -2124,8 +2117,6 @@ impl<
                     .layout_interner
                     .insert_direct_no_semantic(input_list_layout2);
 
-                let caller = self.debug_symbol("caller");
-                let data = self.debug_symbol("data");
                 let alignment = self.debug_symbol("alignment");
                 let old_element_width1 = self.debug_symbol("old_element_width1");
                 let old_element_width2 = self.debug_symbol("old_element_width2");
@@ -2138,49 +2129,10 @@ impl<
 
                 self.load_layout_stack_size(new_element_layout, new_element_width);
 
-                let caller_string = self.lambda_name_to_string(
-                    LambdaName::no_niche(caller_proc.proc_symbol),
-                    std::iter::empty(),
-                    None,
-                    Layout::UNIT,
-                );
-
-                // self.helper_proc_symbols .extend([(caller_proc.proc_symbol, caller_proc.proc_layout)]);
-                self.caller_procs.push(caller_proc);
-
-                // function pointer to a function that takes a pointer, and increments
-                let inc_n_data = if let Some(closure_env_layout) = higher_order.closure_env_layout {
-                    self.increment_fn_pointer(closure_env_layout)
-                } else {
-                    // null pointer
-                    self.load_literal_i64(&Symbol::DEV_TMP, 0);
-                    Symbol::DEV_TMP
-                };
-
                 let dec1 = self.decrement_fn_pointer(old_element_layout1);
                 let dec2 = self.decrement_fn_pointer(old_element_layout2);
 
                 self.build_fn_pointer(&caller, caller_string);
-
-                if let Some(_closure_data_layout) = higher_order.closure_env_layout {
-                    let data_symbol = higher_order.passed_function.captured_environment;
-                    self.storage_manager
-                        .ensure_symbol_on_stack(&mut self.buf, &data_symbol);
-                    let (new_elem_offset, _) =
-                        self.storage_manager.stack_offset_and_size(&data_symbol);
-
-                    // Load address of output element into register.
-                    let reg = self.storage_manager.claim_general_reg(&mut self.buf, &data);
-                    ASM::add_reg64_reg64_imm32(
-                        &mut self.buf,
-                        reg,
-                        CC::BASE_PTR_REG,
-                        new_elem_offset,
-                    );
-                } else {
-                    // use a null pointer
-                    self.load_literal(&data, &Layout::U64, &Literal::Int(0u128.to_be_bytes()));
-                }
 
                 // we pass a null pointer when the data is not owned. the zig code must not call this!
                 let data_is_owned = higher_order.closure_env_layout.is_some()
@@ -2284,8 +2236,6 @@ impl<
                     .layout_interner
                     .insert_direct_no_semantic(input_list_layout3);
 
-                let caller = self.debug_symbol("caller");
-                let data = self.debug_symbol("data");
                 let alignment = self.debug_symbol("alignment");
                 let old_element_width1 = self.debug_symbol("old_element_width1");
                 let old_element_width2 = self.debug_symbol("old_element_width2");
@@ -2300,50 +2250,11 @@ impl<
 
                 self.load_layout_stack_size(new_element_layout, new_element_width);
 
-                let caller_string = self.lambda_name_to_string(
-                    LambdaName::no_niche(caller_proc.proc_symbol),
-                    std::iter::empty(),
-                    None,
-                    Layout::UNIT,
-                );
-
-                // self.helper_proc_symbols .extend([(caller_proc.proc_symbol, caller_proc.proc_layout)]);
-                self.caller_procs.push(caller_proc);
-
-                // function pointer to a function that takes a pointer, and increments
-                let inc_n_data = if let Some(closure_env_layout) = higher_order.closure_env_layout {
-                    self.increment_fn_pointer(closure_env_layout)
-                } else {
-                    // null pointer
-                    self.load_literal_i64(&Symbol::DEV_TMP, 0);
-                    Symbol::DEV_TMP
-                };
-
                 let dec1 = self.decrement_fn_pointer(old_element_layout1);
                 let dec2 = self.decrement_fn_pointer(old_element_layout2);
                 let dec3 = self.decrement_fn_pointer(old_element_layout3);
 
                 self.build_fn_pointer(&caller, caller_string);
-
-                if let Some(_closure_data_layout) = higher_order.closure_env_layout {
-                    let data_symbol = higher_order.passed_function.captured_environment;
-                    self.storage_manager
-                        .ensure_symbol_on_stack(&mut self.buf, &data_symbol);
-                    let (new_elem_offset, _) =
-                        self.storage_manager.stack_offset_and_size(&data_symbol);
-
-                    // Load address of output element into register.
-                    let reg = self.storage_manager.claim_general_reg(&mut self.buf, &data);
-                    ASM::add_reg64_reg64_imm32(
-                        &mut self.buf,
-                        reg,
-                        CC::BASE_PTR_REG,
-                        new_elem_offset,
-                    );
-                } else {
-                    // use a null pointer
-                    self.load_literal(&data, &Layout::U64, &Literal::Int(0u128.to_be_bytes()));
-                }
 
                 // we pass a null pointer when the data is not owned. the zig code must not call this!
                 let data_is_owned = higher_order.closure_env_layout.is_some()
@@ -2459,8 +2370,6 @@ impl<
                     .layout_interner
                     .insert_direct_no_semantic(input_list_layout4);
 
-                let caller = self.debug_symbol("caller");
-                let data = self.debug_symbol("data");
                 let alignment = self.debug_symbol("alignment");
                 let old_element_width1 = self.debug_symbol("old_element_width1");
                 let old_element_width2 = self.debug_symbol("old_element_width2");
@@ -2477,51 +2386,12 @@ impl<
 
                 self.load_layout_stack_size(new_element_layout, new_element_width);
 
-                let caller_string = self.lambda_name_to_string(
-                    LambdaName::no_niche(caller_proc.proc_symbol),
-                    std::iter::empty(),
-                    None,
-                    Layout::UNIT,
-                );
-
-                // self.helper_proc_symbols .extend([(caller_proc.proc_symbol, caller_proc.proc_layout)]);
-                self.caller_procs.push(caller_proc);
-
-                // function pointer to a function that takes a pointer, and increments
-                let inc_n_data = if let Some(closure_env_layout) = higher_order.closure_env_layout {
-                    self.increment_fn_pointer(closure_env_layout)
-                } else {
-                    // null pointer
-                    self.load_literal_i64(&Symbol::DEV_TMP, 0);
-                    Symbol::DEV_TMP
-                };
-
                 let dec1 = self.decrement_fn_pointer(old_element_layout1);
                 let dec2 = self.decrement_fn_pointer(old_element_layout2);
                 let dec3 = self.decrement_fn_pointer(old_element_layout3);
                 let dec4 = self.decrement_fn_pointer(old_element_layout4);
 
                 self.build_fn_pointer(&caller, caller_string);
-
-                if let Some(_closure_data_layout) = higher_order.closure_env_layout {
-                    let data_symbol = higher_order.passed_function.captured_environment;
-                    self.storage_manager
-                        .ensure_symbol_on_stack(&mut self.buf, &data_symbol);
-                    let (new_elem_offset, _) =
-                        self.storage_manager.stack_offset_and_size(&data_symbol);
-
-                    // Load address of output element into register.
-                    let reg = self.storage_manager.claim_general_reg(&mut self.buf, &data);
-                    ASM::add_reg64_reg64_imm32(
-                        &mut self.buf,
-                        reg,
-                        CC::BASE_PTR_REG,
-                        new_elem_offset,
-                    );
-                } else {
-                    // use a null pointer
-                    self.load_literal(&data, &Layout::U64, &Literal::Int(0u128.to_be_bytes()));
-                }
 
                 // we pass a null pointer when the data is not owned. the zig code must not call this!
                 let data_is_owned = higher_order.closure_env_layout.is_some()
@@ -2605,7 +2475,7 @@ impl<
 
                 self.free_symbol(&Symbol::DEV_TMP3);
             }
-            HigherOrder::ListSortWith { .. } => todo!(),
+            HigherOrder::ListSortWith { xs } => todo!(),
         }
     }
 
