@@ -363,6 +363,20 @@ pub(crate) fn surgery_pe(executable_path: &Path, metadata_path: &Path, roc_app_b
                     size_of_raw_data,
                 );
             }
+            SectionKind::Data => {
+                code_bytes_added += size_of_raw_data;
+
+                write_section_header(
+                    executable,
+                    *b".data1\0\0",
+                    pe::IMAGE_SCN_CNT_INITIALIZED_DATA,
+                    section_header_start,
+                    section_file_offset,
+                    virtual_size,
+                    section_virtual_address,
+                    size_of_raw_data,
+                );
+            }
             SectionKind::ReadOnlyData => {
                 data_bytes_added += size_of_raw_data;
 
@@ -409,7 +423,20 @@ pub(crate) fn surgery_pe(executable_path: &Path, metadata_path: &Path, roc_app_b
                                 relocation,
                             );
                         }
-                        _ => todo!(),
+                        object::RelocationKind::Absolute => {
+
+                            dbg!(&relocation);
+
+                            relocate_to(
+                                executable,
+                                0 as usize,
+                                0 as i64,
+                                relocation,
+                            );
+                        }
+                        _ => {
+                            todo!("unimplemented relocation kind for Windows linker {:?}", relocation.kind())
+                        },
                     }
                 } else if let Some(destination) = inter_app_relocations.get(name) {
                     relocate_to(
@@ -454,6 +481,8 @@ pub(crate) fn surgery_pe(executable_path: &Path, metadata_path: &Path, roc_app_b
                         );
                     }
 
+                    
+
                     match relocation.kind() {
                         object::RelocationKind::Relative => {
                             relocate_to(
@@ -463,7 +492,20 @@ pub(crate) fn surgery_pe(executable_path: &Path, metadata_path: &Path, roc_app_b
                                 relocation,
                             );
                         }
-                        _ => todo!(),
+                        object::RelocationKind::Absolute => {
+
+                            dbg!(&relocation);
+
+                            relocate_to(
+                                executable, 
+                                0 as usize, 
+                                0 as i64, 
+                                relocation,
+                            );
+                        }
+                        _ => {
+                            todo!("unimplemented relocation kind for Windows linker {:?}", relocation.kind())
+                        },
                     }
                 }
             }
@@ -1023,7 +1065,7 @@ fn redirect_dummy_dll_functions(
 #[repr(u8)]
 enum SectionKind {
     Text,
-    // Data,
+    Data,
     ReadOnlyData,
 }
 
@@ -1103,15 +1145,23 @@ impl<'a> AppSections<'a> {
         let mut section_starts = MutMap::default();
 
         let mut text_bytes = 0;
+        let mut data_bytes = 0;
         let mut rdata_bytes = 0;
 
         for (i, section) in file.sections().enumerate() {
-            let kind = match section.name() {
-                Ok(".text") => SectionKind::Text,
-                // Ok(".data") => SectionKind::Data,
-                Ok(".rdata") => SectionKind::ReadOnlyData,
 
-                _ => continue,
+            dbg!(i, section.name());
+
+            let kind = match section.name() {
+                Ok(name) => {
+                    match name {
+                        _ if name.starts_with(".text") => SectionKind::Text,
+                        _ if name.starts_with(".data") => SectionKind::Data,
+                        _ if name.starts_with(".rdata") => SectionKind::ReadOnlyData,
+                        _ => continue,
+                    }
+                },
+                Err(_) => continue,
             };
 
             let mut relocations: MutMap<String, Vec<AppRelocation>> = MutMap::default();
@@ -1148,6 +1198,10 @@ impl<'a> AppSections<'a> {
                     section_starts.insert(index, (kind, text_bytes));
                     text_bytes += length;
                 }
+                SectionKind::Data => {
+                    section_starts.insert(index, (kind, data_bytes));
+                    data_bytes += length;
+                }
                 SectionKind::ReadOnlyData => {
                     section_starts.insert(index, (kind, rdata_bytes));
                     rdata_bytes += length;
@@ -1180,8 +1234,17 @@ impl<'a> AppSections<'a> {
         for symbol in file.symbols() {
             use object::ObjectSymbol;
 
+            
+
             if symbol.name_bytes().unwrap_or_default().starts_with(b"roc") {
+
+                
+
                 if let object::SymbolSection::Section(index) = symbol.section() {
+
+                    // dbg!(&symbol);
+                    // dbg!(&section_starts);
+
                     let (kind, offset_in_host_section) = section_starts[&index];
 
                     let symbol = AppSymbol {
