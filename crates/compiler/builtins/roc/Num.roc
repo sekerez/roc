@@ -493,9 +493,10 @@ F32 : Num (FloatingPoint Binary32)
 ##
 ## ## Performance Details
 ##
-## [Dec] typically takes slightly less time than [F64] to perform addition and
-## subtraction, but 10-20 times longer to perform multiplication and division.
-## [sqrt] and trigonometry are massively slower with [Dec] than with [F64].
+## [Dec] typically takes about 25% less time than [F64] to perform addition and
+## subtraction, but about 4 times as long to perform multiplication, and
+## about 32 times as long to perform division.
+## [sqrt] and trigonometry are slower with [Dec] than with [F64].
 Dec : Num (FloatingPoint Decimal)
 
 ## Euler's number (e)
